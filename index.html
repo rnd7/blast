@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<!-- saved from url=(0027)http://goldsource.de/blast/ -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta charset="utf-8">
+<title>BLAST</title>
+<style type="text/css">
+body{
+  margin:0;
+  padding:0;
+  background-color:#000005;
+  overflow:hidden;
+}
+</style>
+</head>
+<body>
+<canvas id="screen" width="2560" height="1278"></canvas>
+<script>
+/*
+* BLAST
+* Jump in and join the armed space forces in this hyper realistic, cutting 
+* edge science fiction Game. A team of 437 developers worked 2 years
+* to write this killer App. 
+*
+* The source code is released under the MIT License. 
+* http://opensource.org/licenses/MIT
+*
+* The MIT License (MIT)
+*
+* Copyright (c) 2014 goldsource
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+*/
+var SPLASH=0, START=1, RUN=2, PAUSE=3, GAMEOVER=4, // game states
+state = SPLASH, // current state
+cv = document.getElementById("screen"),
+ctx = cv.getContext("2d"),
+width = 640,
+height = 480,
+fps = 30, // framerate, attention internally using ticks instead of msec
+buffer = [], // tiled space background image
+buffer_map = [], // offset of buffer images (tiling order)
+buffer_size = 2048, // side length of the background image tiles
+buffer_cols = 3, // horizontal space background image tiles
+buffer_rows = 3, // vertical space background image tiles
+buffer_position = {x:0,y:0}, // buffer cycles
+camera ={x:0,y:0}, // camera position
+spacecraft = [], // holds all the spacecrafts (user and computer)
+projectile = [], // bullet bucket
+effect = [], // will contain the explosions
+respawn_count = 2, // amount of new enemies per kill
+scroll_threshold = 100, // determines when to start moving the camera
+loop_interval, // main loop
+keyboard = {up:false,left:false,right:false,down:false,fire:false},
+score = 0; // user score (console type score=1000000; to impress your friends)
+/**
+* Renders a ultra realistic space scene and returns it on a canvas.
+*/
+function makeBuffer(size){
+  var canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  canvas.invalidate = true;
+  var context = canvas.getContext("2d");
+  context.fillStyle = "rgba(0,0,5,1)";
+  context.fillRect(0,0,size,size);
+  var stars = (200+Math.random()*100)|0;
+  for(var i = 0; i<stars;i++){
+    var r = (0xA0+Math.random()*0x60)|0,
+    g = (0xA0+Math.random()*0x60)|0,
+    b = (0x80+Math.random()*0x80)|0;
+    s = 1+Math.random()*1.5;
+    context.beginPath();
+    context.fillStyle = "rgba("+r+","+g+","+b+",1)";
+    context.arc(Math.random()*size,Math.random()*size,s,0,Math.PI*2);
+    context.fill();
+  }
+  return canvas;
+}
+/**
+* Wrapping left to right, top to bottom and vice versa to create an endless
+* space illusion (actually just 3x3 Images rotated over and over)
+*/
+function cycleBuffer(buffer,x,y){
+  buffer_position.x+=x;
+  buffer_position.y+=y;
+  cycle2d(buffer,x,y,buffer_cols);
+}
+function cycle2d(arr,x,y,cols){
+  if(!arr || !arr.length) throw "not a valid array";
+  var arr_length, rows, i, args;
+  x = x||0; y = y||0;
+  arr_length = arr.length;
+  cols = cols||Math.sqrt(arr_length);  
+  rows = arr_length/cols;
+  if(y>0){ // DOWN (remove top, insert bottom)
+    while(y-->0){
+      var tmp = arr.splice(0,cols);
+      for(var j=0;j<tmp.length;j++) tmp[j].invalidate = true;
+      arr.push.apply(arr,tmp);
+    }
+  }else if(y<0){ // UP  (remove bottom, insert top)
+    while(y++<0){
+      var tmp = arr.splice(arr_length-cols,cols);
+      for(var j=0;j<tmp.length;j++) tmp[j].invalidate = true;
+      arr.unshift.apply(arr,tmp);      
+    }
+  } 
+  if(x>0){ // Right (remove left, insert right)    
+    while(x-->0){
+      for(i=0;i<rows;i++){
+        args = [i*cols+cols-1,0];
+        var tmp = arr.splice(i*cols,1);
+        for(var j=0;j<tmp.length;j++) tmp[j].invalidate = true;
+        args.push.apply(args,tmp);
+        arr.splice.apply(arr,args);
+      }
+    }
+  }else if(x<0){ // Left (remove right, insert left)  
+    while(x++<0){
+      for(i=0;i<rows;i++){
+        args = [i*cols,0];
+        var tmp = arr.splice(i*cols+cols-1,1);
+        for(var j=0;j<tmp.length;j++) tmp[j].invalidate = true;
+        args.push.apply(args,tmp);
+        arr.splice.apply(arr,args);
+      }
+    }
+  } 
+}
+/**
+* Spacecraft keyboard binding
+*/
+var keyboard_controller = function(t,d){
+  if(keyboard.left){
+    if(t.command.left<1){
+      // slow start
+      t.command.left +=0.01;
+      t.command.left *= 2;
+      t.command.left = Math.min(1,t.command.left);
+    }
+  }else{  
+    t.command.left = 0;
+  }
+  if(keyboard.right){     
+    if(t.command.right<1){
+      // slow start
+      t.command.right +=0.01;
+      t.command.right *= 2;
+      t.command.right = Math.min(1,t.command.right);
+    }
+  }else{  
+    t.command.right = 0;
+  }
+  if(keyboard.up)t.command.up = 1;
+  else t.command.up = 0;
+  if(keyboard.down) t.command.down = 1;
+  else t.command.down = 0;
+  if(keyboard.fire)t.command.fire = 1;
+  else t.command.fire = 0;  
+}
+/**
+* default_ki
+* Calling this KI is over the top, this method is dumb as hell. It targets the
+* first opponent in spacecrafts, no matter how far away.
+*/
+var default_ki = function(t,d){
+  var dist;
+  var angle;
+  var found =false;
+  // this might be improved, seriously :-D
+  for(var i=0;i<d.length;i++){
+    if(d[i].fraction!=t.fraction){
+      var dy = d[i].y - t.y;
+      var dx = d[i].x - t.x;
+      dist = Math.sqrt(dx*dx+dy*dy);
+      angle = Math.atan2(dy, dx);
+      var delta = Math.atan2(
+        Math.sin(t.rotation-angle),
+        Math.cos(t.rotation-angle)
+      )
+      found=true;
+      break;
+    }
+  }
+  if(found){
+    if(dist>100){
+      t.command.up=1;
+      t.command.down=0;
+    }else{
+      t.command.down=1;
+    }
+    if(delta>t.turn_speed){    
+      t.command.left=1;
+      t.command.right=0;
+    }else if(delta<-t.turn_speed){
+      t.command.right=1; 
+      t.command.left=0;
+    }else if(delta>0.01){
+      t.command.left=delta/t.turn_speed; // match exactly
+      t.command.right=0;
+    }else if(delta<0.01){
+      t.command.right=-delta/t.turn_speed; // match exactly
+      t.command.left=0;
+    }else{    
+      t.command.right=0; 
+      t.command.left=0;
+    }
+    if(dist<400 && Math.abs(delta)<0.1){ // when to start firing
+      t.command.fire = 1;
+    }else{
+      t.command.fire = 0;
+    }
+  }else{  
+    t.command.up=1; // fly away
+    t.command.down=0; 
+    t.command.fire=0;
+    t.command.right=0; 
+    t.command.left=0;
+  }
+}
+/**
+* Gimme one more spacecraft
+*/
+function spawn(x,y){
+  spacecraft.push({        
+     fraction:1,
+     x:x||0,
+     y:y||0,
+     color:[0xFF,0,0],
+     accelaration:0.14,
+     max_speed:7,
+     hit_points:50,
+     turn_speed:0.16,
+     max_hit_points:50,
+     link_camera:false,
+     speed:{x:0,y:0},
+     rotation:Math.random()*2*Math.PI,
+     cooldown:0,
+     cooldown_time:10,
+     command:{
+      up:0,
+      left:0,
+      right:0,
+      down:0,
+      fire:0
+    },
+    on_kill:onEnemyKill,
+    update:default_ki // i want yummy brains
+  });
+}
+/**
+* Gimme more BOOOOOM
+*/
+function makeParticleExplosion(x,y,sx,sy,p_count){
+ var particle = [];
+ for(var i=0;i<p_count;i++){
+   var dir = Math.random()*360*Math.PI/180;
+   var speed = 2+Math.random()*5;
+   particle.push({x:0,y:0,speed:{x:Math.cos(dir)*speed,y:Math.sin(dir)*speed}});
+ }
+ return {
+    x:x, y:y,
+    speed:{x:sx, y:sy},
+    size:1,
+    lifetime:15,
+    particle:particle,
+    color:'#FFFF00',
+  }
+}
+/**
+* renders the scene
+*/
+function render(){
+  ctx.save();
+  ctx.translate(-camera.x,-camera.y); // move the scene to match camera
+  // draw starry night
+  for(var i=0;i<buffer.length;i++){
+    ctx.save();     
+    ctx.translate(
+      (buffer_position.x+buffer_map[i].x)*buffer_size,
+      (buffer_position.y+buffer_map[i].y)*buffer_size
+    );
+    ctx.drawImage(buffer[i], 0, 0);
+    ctx.restore();
+  }
+  // put all the bullets in the air
+  var projectile_len = projectile.length;
+  for(var i=0;i<projectile_len;i++){
+    var proj = projectile[i];
+    ctx.beginPath();
+    ctx.fillStyle = "rgba("+proj.color.join(",")+",1)";
+    ctx.arc(proj.x,proj.y,2,0,Math.PI*2);
+    ctx.fill();
+  }
+  // yeah, draw all the cool space fighters
+  var spacecraft_len = spacecraft.length;
+  for(var i=0;i<spacecraft_len;i++){
+    var sc = spacecraft[i];      
+    ctx.save();
+    ctx.translate(sc.x,sc.y);
+    ctx.rotate(sc.rotation);
+    ctx.fillStyle = "rgba("+sc.color.join(",")+",1)";
+    ctx.beginPath();
+    ctx.moveTo(-2,0);
+    ctx.lineTo(-5,-5);
+    ctx.lineTo(5,0);
+    ctx.lineTo(-5, 5);
+    ctx.lineTo(-2,0);  
+    ctx.fill(); 
+    ctx.restore();
+    ctx.fillStyle = "rgba("+sc.color.join(",")+",0.3)";
+    ctx.fillRect(sc.x-10,sc.y-16,20,2);
+    ctx.fillStyle = "rgba("+sc.color.join(",")+",0.3)";
+    ctx.fillRect(sc.x-10,sc.y-16,sc.hit_points/sc.max_hit_points*20,2);
+  }
+  // Explosions, gimme more Bam
+  var effect_len = effect.length;
+  for(var i=0;i<effect_len;i++){
+    var eff = effect[i];
+    var particle_len = eff.particle.length;
+    for(var j=0;j<particle_len;j++){
+      var p = eff.particle[j];
+      ctx.beginPath();
+      ctx.fillStyle = eff.color;
+      ctx.arc(eff.x+p.x,eff.y+p.y,1,0,Math.PI*2);
+      ctx.fill();
+    }
+  }  
+  // finally draw the score
+  ctx.restore();
+  ctx.save();  
+  ctx.fillStyle = "rgba(255,255,255,0.6";
+  ctx.font="bold 12px Sans";
+  ctx.textAlign = 'right';
+  ctx.shadowColor = 'rgba(0,0,0,1)';
+  ctx.shadowOffsetX = 1;
+  ctx.shadowOffsetY = 1;
+  ctx.shadowBlur = 10;
+  ctx.fillText("Score: "+score,width-4,16);
+  ctx.restore();
+  
+  if(state==GAMEOVER)renderGameOver();
+  else if(state==SPLASH)renderSplashScreen();
+  
+}
+function renderGameOver(){
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.3";
+  ctx.font="bold 100px Sans";
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,1)';
+  ctx.shadowOffsetX = 1;
+  ctx.shadowOffsetY = 1;
+  ctx.shadowBlur = 10;
+  ctx.fillText("GAMEOVER",width/2,height/2+26); // OMG fcking text metrics
+  ctx.fillStyle = "rgba(255,255,255,1";
+  ctx.font="bold 24px Sans";
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,1)';
+  ctx.shadowOffsetX = 1;
+  ctx.shadowOffsetY = 1;
+  ctx.shadowBlur = 15;
+  ctx.fillText("Slap RETURN to restart",width/2,height/2);
+  ctx.restore();
+}
+function renderSplashScreen(){
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.3";
+  ctx.font="bold 200px Sans";
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,1)';
+  ctx.shadowOffsetX = 1;
+  ctx.shadowOffsetY = 1;
+  ctx.shadowBlur = 10;
+  ctx.fillText("BLAST",width/2,height/2+60); // OMG fcking text metrics
+  ctx.fillStyle = "rgba(255,255,255,1";
+  ctx.font="bold 24px Sans";
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,1)';
+  ctx.shadowOffsetX = 1;
+  ctx.shadowOffsetY = 1;
+  ctx.shadowBlur = 15;
+  ctx.fillText("Use WASD keys to fly around",width/2,height/2-24-6);
+  ctx.fillText("Hold SPACE to fire",width/2,height/2);
+  ctx.fillText("Hit RETURN to start the game",width/2,height/2+24+6);  
+  ctx.restore();
+}
+/**
+* Update all the dynamic game objects. Spacecrafts, Bullets, Effects and the
+* Camera.
+*/
+function update(){
+  // iterate explosions
+  for(var i=0;i<effect.length;i++){
+    var eff = effect[i];
+    if(--eff.lifetime<=0){
+      // kill it
+      effect.splice(i,1);
+      i--;
+      continue;
+    };    
+    eff.x+=eff.speed.x;
+    eff.y+=eff.speed.y;
+    for(var j=0;j<eff.particle.length;j++){
+      var p = eff.particle[j];
+      p.x+=p.speed.x;
+      p.y+=p.speed.y;
+    }
+  }
+  // iterate projectiles
+  for(var i=0;i<projectile.length;i++){
+    var proj = projectile[i];
+    if(--proj.lifetime<=0) proj.remove=true; // the clock ticks
+    var spacecraft_len = spacecraft.length;
+    for(var j=0;j<spacecraft_len;j++){
+      var sc = spacecraft[j];     
+      if(sc.fraction==proj.fraction) continue;      
+      var dy = sc.y - proj.y;
+      var dx = sc.x - proj.x;
+      dist = Math.sqrt(dx*dx+dy*dy);
+      if(dist<=proj.distance_threshold){
+         // on target, lets explode a bit
+         sc.hit_points-=proj.damage;
+         effect.push(makeParticleExplosion(sc.x,sc.y,sc.speed.x,sc.speed.y,10));
+         proj.remove = true;
+         break;
+      }
+    }
+    if(proj.remove){
+      // kill it
+      projectile.splice(i,1);
+      i--;
+      continue;
+    }
+    proj.x += proj.speed.x;
+    proj.y += proj.speed.y;
+  }
+  // iterate through spacecrafts
+  for(var i=0;i<spacecraft.length;i++){  
+    var sc = spacecraft[i];     
+    if(sc.hit_points<=0){
+      // no more hitpoints, kill it
+      effect.push(makeParticleExplosion(sc.x,sc.y,sc.speed.x,sc.speed.y,200));
+      sc.on_kill(); // do, what ever has to be done (ie: respawn or gameover)
+      spacecraft.splice(i,1);
+      i--;
+      continue;
+    }
+    sc.update(sc,spacecraft);
+    if(sc.cooldown!=0)sc.cooldown--; // weapon cooldown
+    if(sc.command.up>0){
+      // accelerate
+      sc.speed.x+=Math.cos(sc.rotation)*sc.accelaration*sc.command.up;
+      sc.speed.y+=Math.sin(sc.rotation)*sc.accelaration*sc.command.up;
+    }
+    if(sc.command.left>0){
+      // turn left
+      sc.rotation -=sc.turn_speed*sc.command.left;
+    }
+    if(sc.command.right>0){
+      // turn right
+      sc.rotation +=sc.turn_speed*sc.command.right;  
+    }
+    if(sc.command.down>0){
+      // turn around (against dir of movement)
+      var dir = Math.atan2(-sc.speed.y,-sc.speed.x);
+      var delta = Math.atan2(
+        Math.sin(sc.rotation-dir),
+        Math.cos(sc.rotation-dir)
+      )
+      if(delta<-sc.turn_speed) sc.rotation+=sc.turn_speed*sc.command.down
+      else if(delta>sc.turn_speed) sc.rotation-=sc.turn_speed*sc.command.down
+      else sc.rotation = dir;
+    }
+    if(sc.command.fire == 1 && sc.cooldown==0){
+      // Blast em all away, fire a new projectile
+      projectile.push({
+        fraction:sc.fraction, // no friendly fire, pls
+        color:[sc.color[0],sc.color[1],sc.color[2]],
+        damage:10, // substracted from targets hitpoints
+        x:sc.x,
+        y:sc.y,
+        lifetime:100, // time to live
+        distance_threshold:10, // explodes if opponent is closer
+        speed:{
+          x:Math.cos(sc.rotation)*10+sc.speed.x,
+          y:Math.sin(sc.rotation)*10+sc.speed.y
+        }
+      });
+      sc.cooldown+=sc.cooldown_time; // heat it up
+    }
+    // speed limit
+    var speed = Math.sqrt(Math.pow(sc.speed.x,2)+Math.pow(sc.speed.y,2));
+    if(speed>sc.max_speed){
+      sc.speed.x *= sc.max_speed/speed;
+      sc.speed.y *= sc.max_speed/speed;
+    }
+    sc.x+=sc.speed.x;
+    sc.y+=sc.speed.y; 
+    // link camera, as dirty as your bellybutton ... last one will win
+    if(sc.link_camera){
+      if(sc.x<camera.x+scroll_threshold) camera.x = sc.x-scroll_threshold;      
+      if(sc.y<camera.y+scroll_threshold) camera.y = sc.y-scroll_threshold;
+      if(sc.x>camera.x+width-scroll_threshold)
+        camera.x=sc.x-width+scroll_threshold;
+      if(sc.y>camera.y+height-scroll_threshold)
+        camera.y = sc.y-height+scroll_threshold;
+    }
+  }  
+  // cycle buffer if necessary (and it goes on and on and on)
+  var xo=0,yo=0;
+  if(camera.x<buffer_size*buffer_position.x-buffer_size) xo = -1;
+  else if(camera.x>buffer_size*buffer_position.x+buffer_size) xo = 1;
+  if(camera.y<buffer_size*buffer_position.y-buffer_size) yo = -1;
+  else if(camera.y>buffer_size*buffer_position.y+buffer_size) yo = 1;
+  if(xo!=0 || yo!=0) cycleBuffer(buffer,xo,yo);
+} 
+/**
+* main loop
+*/
+function loop(){
+  update();
+  render();
+}
+/**
+* measure screen and resize app
+*/
+function resize(){
+  width = window.innerWidth || 
+    document.documentElement.clientWidth ||
+    document.getElementsByTagName('body')[0].clientWidth;
+  height = window.innerHeight ||
+    document.documentElement.clientHeight ||
+    document.getElementsByTagName('body')[0].clientHeight;
+  cv.setAttribute("width", width);
+  cv.setAttribute("height", height);
+  cv.width = ctx.width = width;
+  cv.height = ctx.height = height;
+  render();
+}
+/**
+* store keyboard states
+*/
+function updateKeyboard(keyCode,value){
+  if(keyCode==13){ //ENTER
+    if(value==0){
+      if(state==SPLASH) start();
+      else if(state==GAMEOVER) start();
+      else if(state==RUN) splashScreen();
+    }
+    keyboard.start=value;
+  }else if(keyCode==87 ||keyCode==38){ //w or up arrow
+    keyboard.up=value;
+  }else if(keyCode==65 ||keyCode==37){ // a  or left arrow 
+    keyboard.left=value;
+  }else if(keyCode==83 ||keyCode==40){ // s or down arrow
+    keyboard.down=value;
+  }else if(keyCode==68 ||keyCode==39){ // d or right arrow
+    keyboard.right=value;    
+  }else if(keyCode == 32){ // SPACE 
+    keyboard.fire=value;    
+  }else if(keyCode == 80){ // p 
+    keyboard.pause=value;    
+    if(value==0 && state==RUN) pause();
+    else if(value==0 && state==PAUSE) run();
+  }
+}
+function start(){ 
+  state = START;
+  // reset all
+  score = 0;
+  spacecraft.length = 0;
+  effect.length = 0;
+  projectile.length = 0;
+  camera.x = 0;
+  camera.y = 0;
+  cycleBuffer(buffer,-buffer_position.x,-buffer_position.y);
+  // user spacecraft
+  spacecraft.push({
+   fraction:0,
+   x:width/2,
+   y:height/2,
+   color:[0xFF,0xFF,0xFF],
+   link_camera:true,
+   speed:{x:0,y:0},
+   rotation:0,
+   cooldown:0,
+   cooldown_time:10,
+   hit_points:200,
+   max_hit_points:200,
+   accelaration:0.12,
+   turn_speed:0.15,
+   max_speed:6,
+   command:{
+      up:0,
+      left:0,
+      right:0,
+      down:0,
+      fire:0
+    },
+    on_kill:onPlayerKill,
+    update:keyboard_controller
+  });
+  var a = Math.random()*360*Math.PI/180;
+  var dist = Math.max(width,height); 
+  // first enemy
+  spawn(
+    camera.x+width/2+Math.cos(a)*dist,
+    camera.y+height/2+Math.sin(a)*dist
+  );
+  run();
+}
+function pause(){
+  state = PAUSE;
+  if(loop_interval) clearInterval(loop_interval);
+  render();
+}
+function run(){
+  if(state==RUN)return;
+  state = RUN;
+  loop_interval = setInterval(loop,1000/fps);
+  render();
+}
+function gameOver(){
+  state = GAMEOVER;
+  if(loop_interval) clearInterval(loop_interval); 
+  render();
+}
+function splashScreen(){
+  if(loop_interval) clearInterval(loop_interval); 
+  state = SPLASH;
+  render();
+}
+function onKeyDown(e){
+  updateKeyboard(e.keyCode,1);
+}
+function onKeyUp(e){  
+  updateKeyboard(e.keyCode,0);
+} 
+function onResize(e){
+  resize();
+}
+function onPlayerKill(){
+  setTimeout(gameOver,3000);
+}
+function onEnemyKill(){
+  score++;
+  // one killed 2 will spawn, hehehe
+  for(var i=0;i<respawn_count;i++){
+    var a = Math.random()*360*Math.PI/180;
+    var dist = Math.max(width,height);     
+    spawn(      
+      camera.x+width/2+Math.cos(a)*dist,
+      camera.y+height/2+Math.sin(a)*dist
+    );
+  }
+}
+function init(){
+  resize();
+  window.addEventListener("resize", onResize, false);
+  window.addEventListener('keydown', onKeyDown, false); 
+  window.addEventListener('keyup', onKeyUp, false); 
+  ctx.translate(0.001,0.001); // anti aliasing hack
+  for(var i=0;i<buffer_cols*buffer_rows;i++){
+    buffer.push(makeBuffer(buffer_size));        
+    var xo = ~~(buffer_cols/2); // nobody floors like me
+    var yo = ~~(buffer_rows/2);
+    buffer_map.push({x:i%buffer_cols-xo,y:~~(i/buffer_cols)-yo});
+  }  
+  splashScreen();
+}
+init(); // can you kick it?
+</script>
+
+</body></html>
